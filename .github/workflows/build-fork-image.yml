@@ -1,0 +1,130 @@
+name: build-fork-image
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: Docker image tag to publish
+        required: true
+        default: v0.25.6-pg-lock-fix
+      build_mode:
+        description: patch = layer on infiniflow/ragflow:v0.25.6 (fast); full = rebuild Dockerfile
+        required: true
+        default: patch
+        type: choice
+        options:
+          - patch
+          - full
+      need_mirror:
+        description: Use China mirrors for full build (NEED_MIRROR=1)
+        required: false
+        default: false
+        type: boolean
+      push_to_dockerhub:
+        description: Also push to Docker Hub (requires DOCKERHUB_USERNAME + DOCKERHUB_TOKEN secrets)
+        required: false
+        default: false
+        type: boolean
+  push:
+    tags:
+      - "v0.25.6-pg-lock-fix*"
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Resolve build parameters
+        id: meta
+        env:
+          INPUT_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.image_tag || github.ref_name }}
+          INPUT_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.build_mode || 'patch' }}
+          INPUT_MIRROR: ${{ github.event_name == 'workflow_dispatch' && inputs.need_mirror || false }}
+          INPUT_PUSH_HUB: ${{ github.event_name == 'workflow_dispatch' && inputs.push_to_dockerhub || false }}
+        run: |
+          echo "tag=${INPUT_TAG}" >> "${GITHUB_OUTPUT}"
+          echo "mode=${INPUT_MODE}" >> "${GITHUB_OUTPUT}"
+          echo "mirror=$([[ "${INPUT_MIRROR}" == "true" ]] && echo 1 || echo 0)" >> "${GITHUB_OUTPUT}"
+          echo "push_hub=${INPUT_PUSH_HUB}" >> "${GITHUB_OUTPUT}"
+          echo "ghcr=ghcr.io/${GITHUB_REPOSITORY,,}:${INPUT_TAG}" >> "${GITHUB_OUTPUT}"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Log in to Docker Hub
+        if: steps.meta.outputs.push_hub == 'true'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push patch image to GHCR
+        if: steps.meta.outputs.mode == 'patch'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile.v0.25.6-pg-lock-fix
+          push: true
+          tags: ${{ steps.meta.outputs.ghcr }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build and push full image to GHCR
+        if: steps.meta.outputs.mode == 'full'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          push: true
+          build-args: NEED_MIRROR=${{ steps.meta.outputs.mirror }}
+          tags: ${{ steps.meta.outputs.ghcr }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build and push patch image to Docker Hub
+        if: steps.meta.outputs.mode == 'patch' && steps.meta.outputs.push_hub == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile.v0.25.6-pg-lock-fix
+          push: true
+          tags: ${{ secrets.DOCKERHUB_USERNAME }}/ragflow:${{ steps.meta.outputs.tag }}
+          cache-from: type=gha
+
+      - name: Build and push full image to Docker Hub
+        if: steps.meta.outputs.mode == 'full' && steps.meta.outputs.push_hub == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          push: true
+          build-args: NEED_MIRROR=${{ steps.meta.outputs.mirror }}
+          tags: ${{ secrets.DOCKERHUB_USERNAME }}/ragflow:${{ steps.meta.outputs.tag }}
+          cache-from: type=gha
+
+      - name: Summary
+        run: |
+          {
+            echo "## Image published"
+            echo
+            echo "- **Tag:** \`${{ steps.meta.outputs.tag }}\`"
+            echo "- **Mode:** \`${{ steps.meta.outputs.mode }}\`"
+            echo "- **GHCR:** \`${{ steps.meta.outputs.ghcr }}\`"
+            echo
+            echo "K8s: set \`RAGFLOW_IMAGE=${{ steps.meta.outputs.ghcr }}\`"
+          } >> "${GITHUB_STEP_SUMMARY}"

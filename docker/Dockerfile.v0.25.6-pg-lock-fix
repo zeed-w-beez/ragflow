@@ -1,0 +1,7 @@
+# Hotfix image: apply PostgreSQL advisory lock fix on top of the official v0.25.6 image.
+# Only two Python files changed; build completes in minutes instead of a full rebuild.
+ARG BASE_IMAGE=infiniflow/ragflow:v0.25.6
+FROM ${BASE_IMAGE}
+
+COPY api/db/db_models.py /ragflow/api/db/db_models.py
+COPY rag/svr/task_executor.py /ragflow/rag/svr/task_executor.py
